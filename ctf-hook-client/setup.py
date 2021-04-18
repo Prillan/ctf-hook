@@ -1,4 +1,4 @@
-from distutils.core import setup
+from setuptools import setup
 
 setup(name='ctf-hook',
       version='0.1.0',
@@ -6,5 +6,5 @@ setup(name='ctf-hook',
       author='Rasmus Précenth',
       author_email='rasmus@precenth.eu',
       scripts=['ctf-hook'],
-      requires=["requests"]
+      install_requires=["requests"]
      )

@@ -164,7 +164,7 @@ class Client():
                 if v == fname
             ), None)
             if target is None:
-                logger.warn(
+                logger.warning(
                     "Attempting to re-serve file without target. Skipping...",
                 )
                 return
@@ -249,7 +249,7 @@ def main(args, domain, url, user, password):
     logger.addHandler(handler)
 
     if not has_inotify:
-        logger.warn(
+        logger.warning(
             "Couldn't find module inotify_simple. File watching disabled."
         )
 
