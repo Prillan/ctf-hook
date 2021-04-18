@@ -1,0 +1,12 @@
+{
+  "users": [
+    {
+      "__COMMENT__": "The password is 'testpassword'",
+      "name": "example-user",
+      "hash": "$2b$12$eJ9aDfl.FCwGoJQwtLiLYeIXNAURsRWcPx0qBuEtkmaeiBMaabygq"
+    }
+  ],
+  "domain_pattern": "*.127.0.0.1.nip.io",
+  "port": 8080,
+  "debug": true
+}

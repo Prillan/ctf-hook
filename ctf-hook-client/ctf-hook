@@ -1,0 +1,378 @@
+#!/usr/bin/env python3.8
+import argparse
+import base64
+try:
+    import inotify_simple
+    has_inotify = True
+except ImportError:
+    inotify_simple = None
+    has_inotify = False
+
+import logging
+import os
+from pathlib import Path
+from pprint import pprint
+import random
+import requests
+import string
+import sys
+import threading
+import urllib.parse
+
+logger = logging.getLogger(__name__)
+
+def config_file():
+    p = os.getenv('CTF_LISTEN_CONFIG')
+    if p:
+        yield p
+
+    paths = [
+        Path('.ctf-hook').expanduser(),
+        Path('~/.config/ctf-hook').expanduser(),
+        Path('~/.ctf-hook').expanduser(),
+    ]
+    for p in paths:
+        if p.exists():
+            yield p
+
+history_paths = [
+    Path('~/.cache/ctf-hook-history').expanduser(),
+    Path('~/.ctf-hook-history').expanduser(),
+]
+def history_file(exact=True):
+    for p in history_paths:
+        if p.exists():
+            return p
+
+    if not exact:
+        for p in history_paths:
+            if p.parent.exists() and p.parent.is_dir():
+                return p
+
+def read_history():
+    fpath = history_file()
+    if fpath:
+        with fpath.open() as f:
+            data = dict(**{
+                k.strip(): v.strip()
+                for k, v in (
+                        l.strip().split(':')
+                        for l in f
+                        if l.strip()
+                )
+            })
+        logger.debug(f"Read history data from {fpath}.")
+        return data
+    else:
+        return {}
+
+def write_history(data):
+    fpath = history_file(exact=False)
+    with fpath.open('w') as f:
+        for k, v in data.items():
+            f.write(f'{k}:{v}\n')
+    logger.debug(f"Wrote history data to {fpath}")
+
+def append_domain_history(domain):
+    history_data = read_history()
+    history_data['subdomain'] = domain
+    write_history(history_data)
+
+def read_config(cf=None):
+    params = {
+        'domain': None,
+        'user': None,
+        'password': None,
+        'url': None,
+    }
+    if cf:
+        with open(cf, 'r') as f:
+            for line in f:
+                k, *rest = line.split(':')
+                params[k.strip()] = ':'.join(rest).strip()
+
+    for k, v in list(params.items()):
+        val = os.getenv(f'CTF_HOOK_{k.upper()}') or v
+        if v is None:
+            print(f"MISSING PARAM {k}")
+            exit(1)
+
+    return params
+
+choices = string.ascii_lowercase + string.digits
+def gen_key():
+    return ''.join(random.choice(choices) for _ in range(10))
+
+class Client():
+    def __init__(self, domain, url, user, password, subdomain=None):
+        self.domain = domain
+        self.url = url
+        self.user = user
+        self.password = password
+        self.key = subdomain or gen_key()
+        self.token = None
+        self.session = requests.Session()
+        self._serving = {}
+        self._serving_lock = threading.Lock()
+        self._watch_thread = None
+
+    def login(self):
+        r = self.session.post(
+            f'{self.url}/login',
+            data={'user': self.user, 'password': self.password}
+        )
+
+        if r.status_code == 200:
+            self.token = r.json()
+            logger.debug(f"Logged in, token is: {self.token}")
+            self.session.headers['Authorization'] = 'Bearer ' + self.token
+        elif r.status_code == 403:
+            raise Exception("Login failed: " + r.json()) from None
+
+    def listen(self):
+        r = None
+        while True:
+            try:
+                r = self.session.get(f'{self.url}/fetch/{self.key}').json()
+            except TimeoutError:
+                continue
+            if r is None:
+                logger.debug("Received no messages")
+                continue
+            yield r
+
+    def _add_watch(self, target, fpath):
+        with self._serving_lock:
+            if target not in self._serving:
+                self._serving[target] = fpath
+
+    def serve_file(self, fname: Path, target=None):
+        target = target or fname.name
+        self._add_watch(target, fname)
+
+        with fname.open('rb') as f:
+            r = self.session.post(f'{self.url}/serve/{self.key}',
+                                  data={'path': target},
+                                  files={'file': f})
+            logger.info(f"{fname} uploaded to {target}")
+
+    def reserve_file(self, fname: Path):
+        with self._serving_lock:
+            target = next(iter(
+                t
+                for t, v in self._serving.items()
+                if v == fname
+            ), None)
+            if target is None:
+                logger.warn(
+                    "Attempting to re-serve file without target. Skipping...",
+                )
+                return
+
+        self.serve_file(fname, target)
+
+    def handle_file_change(self, fname: Path, flags: list):
+        if inotify_simple.flags.DELETE in flags:
+            raise NotImplementedError('IN_DELETE for files')
+        if inotify_simple.flags.MODIFY in flags:
+            self.reserve_file(fname)
+
+    def watch_files(self):
+        if self._watch_thread:
+            self.stop_watch()
+
+        self._watch_thread = WatchThread(self)
+        self._watch_thread.start()
+
+    def stop_watch(self):
+        self._watch_thread.stop()
+        self._watch_thread.join()
+        self._watch_thread = None
+
+class WatchThread(threading.Thread):
+    def __init__(self, client, *args, **kwargs):
+        self.client = client
+        self._should_stop = threading.Event()
+        super().__init__(*args, **kwargs)
+
+    def run(self):
+        inotify = inotify_simple.INotify()
+
+        file_flags = (
+            inotify_simple.flags.MODIFY |
+            inotify_simple.flags.DELETE |
+            inotify_simple.flags.DELETE_SELF
+        )
+        dir_flags = (
+            inotify_simple.flags.CREATE |
+            inotify_simple.flags.MODIFY |
+            inotify_simple.flags.DELETE |
+            inotify_simple.flags.DELETE_SELF
+        )
+
+        watching = {}
+
+        with self.client._serving_lock:
+            for f in self.client._serving.values():
+                if f.is_file():
+                    # TODO: Fix absolute path watch
+                    wd = inotify.add_watch(f.name, file_flags)
+                elif f.is_dir():
+                    wd = inotify.add_watch(f.name, dir_flags)
+
+                watching[wd] = f
+
+        while not self._should_stop.is_set():
+            for event in inotify.read(1, 0.5):
+                target = watching[event.wd]
+                logger.debug(f"inotify: {target}: {event}")
+                flags = inotify_simple.flags.from_mask(event.mask)
+                if target.is_file():
+                    self.client.handle_file_change(target, flags)
+                elif target.is_dir():
+                    pass # TODO: Handle
+
+    def stop(self):
+        self._should_stop.set()
+
+def main(args, domain, url, user, password):
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+    elif args.quiet:
+        pass
+    else:
+        logger.setLevel(logging.INFO)
+
+    handler = logging.StreamHandler(sys.stderr)
+    formatter = logging.Formatter('[%(asctime)s]: %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    if not has_inotify:
+        logger.warn(
+            "Couldn't find module inotify_simple. File watching disabled."
+        )
+
+    if args.reuse_subdomain:
+        subdomain = read_history().get('subdomain')
+    else:
+        subdomain = None
+
+    client = Client(domain, url, user, password, subdomain=subdomain)
+    client.login()
+
+    logger.info(f"Using domain {client.key}.{client.domain}")
+    logger.info(f"   Try a query: curl {client.key}.{client.domain}/flag-xxyy")
+    append_domain_history(client.key)
+
+    if args.serve:
+        if args.serve.is_file():
+            client.serve_file(args.serve, target='*')
+        elif args.serve.is_dir():
+            client.serve_dir(args.serve)
+
+    for p in args.serve_file:
+        client.serve_file(p)
+
+    if has_inotify:
+        client.watch_files()
+
+    try:
+        for r in client.listen():
+            if args.path:
+                data = r['raw_path']
+                if args.strip and data.startswith('/'):
+                    data = data[1:]
+            elif args.json:
+                data = r['json_body']
+            else:
+                data = r
+
+            if args.urldecode and isinstance(data, str):
+                data = urllib.parse.unquote(data)
+
+            if args.base64 and isinstance(data, str):
+                data = base64.b64decode(data).decode()
+
+            if isinstance(data, dict):
+                pprint(data)
+            else:
+                print(data)
+    except KeyboardInterrupt:
+        pass
+
+    if has_inotify:
+        client.stop_watch()
+
+def argument_parser():
+    def FilePath(s):
+        p = Path(s)
+        if p.is_file():
+            return p
+        else:
+            raise argparse.ArgumentTypeError(f"{p} is not a file!")
+
+    parser = argparse.ArgumentParser()
+    group_core = parser.add_argument_group('General options')
+    group_core.add_argument('--verbose', '-v', action='store_true',
+                            default=False, help="Show debug information.")
+    group_core.add_argument('--quiet', '-q', action='store_true', default=False,
+                            help="Silence log output.")
+    group_core.add_argument('--reuse-subdomain', '-rs', action='store_true',
+                            default=False,
+                            help="Reuse the last used subdomain.")
+    group_core.add_argument('--config-file', default=None,
+                            help="Load config from CONFIG_FILE.")
+
+    group_serving = parser.add_argument_group('Serving files/directories')
+    group_serving.add_argument('--serve', type=Path, default=None,
+                               metavar="PATH",
+                               help=("Serves the whole directory structure if "
+                                     "PATH is a directory, rooted at / on the"
+                                     " server.\n"
+                                     "Sets the default server response if PATH"
+                                     " is a file."))
+    group_serving.add_argument('--serve-file', '-sf', type=FilePath, default=[],
+                               metavar='FILE', action='append',
+                               help=("Serves FILE at /FILE on the server. (Can"
+                                     " be repeated multiple times)"))
+
+
+
+    group_output = parser.add_argument_group('Outputting')
+    group_output.add_argument('--json', '-j', action='store_true',
+                              default=False,
+                              help=("Output each request interpreted as"
+                                    " a json payload."))
+    group_output.add_argument('--path', '-p', action='store_true',
+                              default=False,
+                              help="Only output the path of each request.")
+
+    group_output.add_argument('--strip', action='store_true',
+                              default=False,
+                              help=("Strips output of irrelevant parts."
+                                    " Currently only removes leading / from"
+                                    " --path output."))
+    group_output.add_argument('--urldecode', action='store_true', default=False,
+                              help=("Url decode/unquote data before"
+                                    " outputting it. Works with --path. Applies"
+                                    " after --strip."))
+    group_output.add_argument('--base64', '-b64', action='store_true',
+                              default=False,
+                              help=("Base64 decode data before"
+                                    " outputting it. Works with --path. Applies"
+                                    " after --urldecode."))
+
+    return parser
+
+if __name__ == '__main__':
+    parser = argument_parser()
+    args = parser.parse_args()
+
+    if args.config_file:
+        cf = args.config_file
+    else:
+        cf = next(iter(config_file()), None)
+
+    config = read_config(cf)
+    main(args, **config)
