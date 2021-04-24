@@ -9,12 +9,11 @@ TODO
 Requires at least Python 3.8.
 
 ```
+$ pip install 'git+https://github.com/Prillan/ctf-hook#subdirectory=ctf-hook-client'
+```
+or clone and run
+```
 $ pip3.8 install --user ./ctf-hook-client
-Processing ./ctf-hook-client
-Using legacy setup.py install for ctf-hook, since package 'wheel' is not installed.
-Installing collected packages: ctf-hook
-    Running setup.py install for ctf-hook ... done
-Successfully installed ctf-hook-0.1.0
 ```
 
 ### The Client with Nix
