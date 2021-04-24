@@ -10,8 +10,8 @@ import           Database.Redis             (checkedConnect, defaultConnectInfo,
                                              disconnect)
 import           System.Environment         (getEnv)
 
-import           CTF.Hook.App             (runApp)
-import           CTF.Hook.Config          (Config, decodeConfig)
+import           CTF.Hook.App               (runApp)
+import           CTF.Hook.Config            (Config, decodeConfig)
 
 readConfig :: ExceptT String IO Config
 readConfig = do

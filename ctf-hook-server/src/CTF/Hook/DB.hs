@@ -1,10 +1,13 @@
 {-# LANGUAGE DeriveDataTypeable         #-}
 {-# LANGUAGE DeriveGeneric              #-}
+{-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase                 #-}
 {-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE UndecidableInstances       #-}
 module CTF.Hook.DB ( Redis
                    , ServableResponse(..)
+                   , Error(..)
                    , sessionUser
                    , fetchServedResponse
                    , newSession
@@ -16,6 +19,8 @@ module CTF.Hook.DB ( Redis
 import           Control.Applicative        (Alternative (empty, (<|>)))
 import           Control.Monad              (join, replicateM)
 import           Control.Monad.IO.Class     (MonadIO (liftIO))
+import           Control.Monad.Random       (MonadRandom, uniform)
+import           Control.Monad.Trans.Class  (MonadTrans, lift)
 import           Control.Monad.Trans.Except (ExceptT (..), mapExceptT)
 import           Data.ByteString            (ByteString)
 import           Data.Data                  (Data, Typeable)
@@ -26,20 +31,42 @@ import           Database.Redis             (Connection, RedisCtx, Reply, blpop,
                                              set)
 import qualified Database.Redis             as R
 import           GHC.Generics               (Generic)
-import           Control.Monad.Random       (evalRandIO, uniform)
 
-import           CTF.Hook.Types             ( SessionToken (..)
-                                            , Subdomain (..)
-                                            , User (..))
+import           CTF.Hook.Convert           (convert)
+import           CTF.Hook.Types             (SessionToken (..), Subdomain (..),
+                                             User (..))
 import           CTF.Hook.Utils             (eitherToMaybe)
+
+
+data Error = RedisError ByteString
+           | GeneralError String
+  deriving Eq
+
+instance Show Error where
+  show = \case
+    RedisError e -> "redis error: " <> convert e
+    GeneralError e -> e
 
 -- This is the type exposed to the rest of the library/program,
 -- internally in this module we might use (RedisCtx m f) => m (f a)
 -- sometimes, but don't expose it.
-newtype Redis a = Redis (ExceptT Reply R.Redis a)
+newtype Redis a = Redis (ExceptT [Error] R.Redis a)
   deriving (Functor, Applicative, Monad, MonadIO)
 
-runRedis :: MonadIO m => Connection -> Redis a -> ExceptT Reply m a
+instance MonadFail Redis where
+  fail = Redis . ExceptT . pure . Left . pure . GeneralError
+
+class Monad m => MonadRedis m where
+  fromCtx :: R.Redis (Either Reply a) -> m a
+
+instance {-# OVERLAPPABLE #-}
+  ( Monad (t m)
+  , MonadTrans t
+  , MonadRedis m
+  ) => MonadRedis (t m) where
+  fromCtx = lift . fromCtx
+
+runRedis :: MonadIO m => Connection -> Redis a -> ExceptT [Error] m a
 runRedis c (Redis x) = mapExceptT (liftIO . R.runRedis c) x
 
 -- Forces
@@ -50,8 +77,11 @@ runRedis c (Redis x) = mapExceptT (liftIO . R.runRedis c) x
 --     fromCtx (get "a") :: Redis (Maybe ByteString)
 -- instead of
 --     get "a" :: RedisCtx m f => m (f a)
-fromCtx :: R.Redis (Either Reply a) -> Redis a
-fromCtx = Redis . ExceptT
+instance MonadRedis Redis where
+  fromCtx m = Redis . ExceptT $ m >>= \case
+    Right v          -> pure (Right v)
+    Left (R.Error e) -> pure (Left [RedisError e])
+    Left _           -> pure (Left [GeneralError "invalid redis error"])
 
 -- TODO: Make the timeouts configurable
 sessionTimeout :: Integer
@@ -92,45 +122,44 @@ ownerKey (Subdomain subdomain) = "ctf-hook/owner/" <> subdomain
 touchKey :: (Applicative f, RedisCtx m f) => ByteString -> m (f ())
 touchKey key = expire key dataTimeout *> emptyResponse
 
-newSession :: User
+newSession :: (MonadFail m, MonadRedis m, MonadRandom m)
+  => User
   -> Maybe Subdomain
-  -> Redis (Maybe (SessionToken, Subdomain))
+  -> m (SessionToken, Subdomain)
 newSession user subdomain = do
   token <- generateSessionToken
   fromCtx $ insertSessionToken token user
   case subdomain of
-    Just subdomain' -> subdomainOwner subdomain' >>= \case
-      Just owner | owner == user -> pure (Just (token, subdomain'))
-      -- If the owner is a different user, fail.
-      --
-      -- If the subdomain isn't registered, fail (we don't
-      -- want users to generate their own names atm).
-      _ -> pure Nothing
+    Just subdomain' ->
+      validateOwner user subdomain' *> pure (token, subdomain')
     Nothing -> do
       subdomain' <- generateSubdomain
       fromCtx $ registerSubdomain user subdomain'
-      pure (Just (token, subdomain'))
+      pure (token, subdomain')
 
-generateSubdomain :: MonadIO m => m Subdomain
-generateSubdomain = liftIO . evalRandIO $
-  fromString <$> replicateM 10 (uniform $ ['a'..'z'] ++ ['0'..'9'])
+generateSubdomain :: (MonadRedis m, MonadRandom m) => m Subdomain
+generateSubdomain = do
+  candidate <- fromString <$> replicateM 10 (uniform $ ['a'..'z'] ++ ['0'..'9'])
+  let key = ownerKey candidate
+  fromCtx (get key) >>= \case
+    Just _  -> generateSubdomain
+    Nothing -> pure candidate
 
-generateSessionToken :: MonadIO m => m SessionToken
-generateSessionToken = liftIO . evalRandIO $
+generateSessionToken :: MonadRandom m => m SessionToken
+generateSessionToken =
   fromString <$> replicateM 30 (uniform ['a'..'z'])
 
 registerSubdomain :: (Applicative f, RedisCtx m f)
                   => User
                   -> Subdomain
                   -> m (f ())
-registerSubdomain (User user) subdomain = do
-  let key = ownerKey subdomain
-  set key user
-  expire key ownerTimeout
-  pure (pure ())
+registerSubdomain (User user) subdomain =
+  set key user *> expire key ownerTimeout *> emptyResponse
+  where key = ownerKey subdomain
 
-subdomainOwner :: Subdomain
-               -> Redis (Maybe User)
+subdomainOwner :: MonadRedis m
+               => Subdomain
+               -> m (Maybe User)
 subdomainOwner subdomain = do
   let key = ownerKey subdomain
   fmap User <$> fromCtx (get key <* expire key ownerTimeout)
@@ -139,11 +168,9 @@ insertSessionToken :: (Applicative f, RedisCtx m f)
                    => SessionToken
                    -> User
                    -> m (f ())
-insertSessionToken token (User user) = do
-  let key = sessionKey token
-  set key user
-  expire key sessionTimeout
-  emptyResponse
+insertSessionToken token (User user) =
+  set key user *> expire key sessionTimeout *> emptyResponse
+  where key = sessionKey token
 
 sessionUser :: SessionToken -> Redis (Maybe User)
 sessionUser token =
@@ -156,35 +183,43 @@ pushData :: Subdomain -> ByteString -> Redis ()
 pushData subdomain d = fromCtx $ rpush key [d] *> touchKey key
   where key = subdomainRequestKey subdomain
 
-readData :: User -> Subdomain -> Redis (Maybe ByteString)
-readData user subdomain =
+readData :: (MonadFail m, MonadRedis m)
+  => User
+  -> Subdomain
+  -> m (Maybe ByteString)
+readData user subdomain = do
+  validateOwner user subdomain
   let key = subdomainRequestKey subdomain
-  in
-    subdomainOwner subdomain >>= \case
-      Just owner | owner == user -> do
-        d <- fromCtx $ blpop [key] readBlockTimeout
-        fromCtx $ touchKey key
-        pure $ snd <$> d
-      _ -> pure Nothing -- TODO: Provide error message
+  d <- fromCtx $ blpop [key] readBlockTimeout
+  fromCtx $ touchKey key
+  pure $ snd <$> d
 
-storeServedResponse :: User
+storeServedResponse :: (MonadFail m, MonadRedis m)
+                    => User
                     -> Subdomain
                     -> ByteString
                     -> ServableResponse
-                    -> Redis (Maybe ())
-storeServedResponse user subdomain path content =
+                    -> m (Maybe ())
+storeServedResponse user subdomain path content = do
+  validateOwner user subdomain
+  let key = subdomainResponseKey subdomain
+  fromCtx $ hset key path (encode content)
+  fromCtx $ expire key dataTimeout
+  pure (Just ())
+
+validateOwner :: (MonadFail m, MonadRedis m)
+  => User
+  -> Subdomain
+  -> m ()
+validateOwner user subdomain =
   subdomainOwner subdomain >>= \case
-    Just owner | owner == user -> do
-        let key = subdomainResponseKey subdomain
-        fromCtx $ hset key path (encode content)
-        fromCtx $ expire key dataTimeout
-        pure (Just ())
-    _ -> pure Nothing -- TODO: Provide error message
+    Just owner | owner == user -> pure ()
+    _ -> fail "subdomain doesn't exist, or not the owner"
 
-
-fetchServedResponse :: Subdomain
+fetchServedResponse :: MonadRedis m
+                    => Subdomain
                     -> ByteString
-                    -> Redis (Maybe ServableResponse)
+                    -> m (Maybe ServableResponse)
 fetchServedResponse subdomain path = do
   let key = subdomainResponseKey subdomain
       x = fromCtx $ do

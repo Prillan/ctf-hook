@@ -5,26 +5,23 @@
 module CTF.Hook.App where -- (runApp, app) where
 
 import           Control.Monad                        (join, when)
-import           Control.Monad.IO.Class               (MonadIO (liftIO))
+import           Control.Monad.IO.Class               (MonadIO)
 import           Control.Monad.Trans.Except           (runExceptT)
 import           Control.Monad.Trans.Maybe            (MaybeT (MaybeT, runMaybeT))
+import           Control.Monad.Trans.Random           (evalRandTIO)
 import           Crypto.BCrypt                        (validatePassword)
-import           Data.Aeson                           ((.=),
-                                                       Value (..),
-                                                       object,
-                                                       encode)
+import           Data.Aeson                           (Value (..), encode,
+                                                       object, toJSON, (.=))
 import qualified Data.ByteString                      as B
 import qualified Data.ByteString.Lazy                 as LB
 import           Data.Char                            (isDigit)
 import           Data.String                          (fromString)
 import qualified Data.Text
-import qualified Data.Text.Encoding                   as E
-import           Database.Redis                       (Connection,
-                                                       Reply (Error))
-import           Network.HTTP.Types.Status            (status403, status500)
+import           Database.Redis                       (Connection)
+import           Network.HTTP.Types.Status            (Status, status403,
+                                                       status500)
 import           Network.Wai                          (Application, Request,
-                                                       pathInfo,
-                                                       rawPathInfo,
+                                                       pathInfo, rawPathInfo,
                                                        requestHeaderHost)
 import           Network.Wai.Middleware.RequestLogger (logStdoutDev)
 import           Network.Wai.Parse                    (FileInfo (..))
@@ -88,8 +85,12 @@ app' Config{..} conn = do
 requestProperty :: (Request -> a) -> S.ActionM a
 requestProperty prop = prop <$> S.request
 
-redis :: MonadIO m => Connection -> Redis a -> m (Either Reply a)
+redis :: MonadIO m => Connection -> Redis a -> m (Either [Error] a)
 redis conn = runExceptT . runRedis conn
+
+
+returnErrors :: Show a => Status -> [a] -> S.ActionM ()
+returnErrors s es = S.status s *> S.json (object [ "errors" .= toJSON (map show es) ])
 
 storeDataView :: Connection -> S.ActionM ()
 storeDataView r = do
@@ -99,8 +100,6 @@ storeDataView r = do
   response <- redis r $ do
     pushData subdomain (LB.toStrict storableReq)
     fetchServedResponse subdomain path
-
-  liftIO $ print $ response
   case response of
     Right (Just response') -> do
       S.setHeader "Content-Type" (convert $ srContentType response')
@@ -108,9 +107,7 @@ storeDataView r = do
     Right Nothing -> do
       let sd = convert (unSubdomain subdomain)
       S.text $ fromString $ "data stored for subdomain " ++ sd ++ "!"
-    Left _ -> do
-      S.status status500
-      S.json (str $ "other redis error")
+    Left es -> returnErrors status500 es
 
 indexView :: S.ActionM ()
 indexView = S.text "hello world!"
@@ -124,12 +121,7 @@ fetchView user r = do
       S.setHeader "Content-Type" "application/json; charset=utf-8"
       S.raw (LB.fromStrict d)
     Right Nothing  -> S.json Null
-    Left (Error e) -> do
-      S.status status500
-      S.json (str $ "redis error: " <> E.decodeUtf8 e)
-    Left _ -> do
-      S.status status500
-      S.json (str $ "other redis error")
+    Left es -> returnErrors status500 es
 
 serveView :: User -> Connection -> S.ActionM ()
 serveView user r = do
@@ -177,20 +169,24 @@ loginView users r = do
   pass <- S.param "password"
   requestedSubdomain <- (Just <$> subdomainParam) `S.rescue` (\_ -> pure Nothing)
   if verifyCredentials users user pass
-    then
-    redis r (newSession (User (convert user)) requestedSubdomain) >>= \case
-      Right (Just (SessionToken token, Subdomain subdomain)) ->
+    then login r (User (convert user)) requestedSubdomain >>= \case
+      Right (SessionToken token , Subdomain subdomain) ->
         S.json (object [ "token" .= str (convert token)
                        , "subdomain" .= str (convert subdomain) ])
-      Right Nothing -> do
-        S.status status403
-        S.json (str $ "Not allowed to access subdomain")
-      _ -> do
-        S.status status500
-        S.json (str $ "error")
+      Left es -> returnErrors status403 es
     else do
       S.status status403
       S.json (str $ "Invalid username or password")
+
+login :: MonadIO m
+  => Connection
+  -> User
+  -> Maybe Subdomain
+  -> m (Either [Error] (SessionToken, Subdomain))
+login conn user subdomain =
+  redis conn
+  . evalRandTIO
+  $ newSession user subdomain
 
 getRequestToken :: MaybeT S.ActionM SessionToken
 getRequestToken = do

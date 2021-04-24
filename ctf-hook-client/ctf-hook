@@ -132,7 +132,9 @@ class Client():
             logger.debug(f"Logged in, token is: {self.token}, subdomain is: {self.key}")
             self.session.headers['Authorization'] = 'Bearer ' + self.token
         elif r.status_code == 403:
-            raise Exception("Login failed: " + r.json()) from None
+            raise Exception(
+                "Login failed: " + ", ".join(r.json()["errors"])
+            ) from None
 
     def listen(self):
         r = None
