@@ -4,7 +4,7 @@
 {-# LANGUAGE RecordWildCards   #-}
 module CTF.Hook.App where -- (runApp, app) where
 
-import           Control.Monad                        (join)
+import           Control.Monad                        (join, when)
 import           Control.Monad.IO.Class               (MonadIO (liftIO))
 import           Control.Monad.Trans.Except           (runExceptT)
 import           Control.Monad.Trans.Maybe            (MaybeT (MaybeT, runMaybeT))
@@ -23,6 +23,7 @@ import           Database.Redis                       (Connection,
                                                        Reply (Error))
 import           Network.HTTP.Types.Status            (status403, status500)
 import           Network.Wai                          (Application, Request,
+                                                       pathInfo,
                                                        rawPathInfo,
                                                        requestHeaderHost)
 import           Network.Wai.Middleware.RequestLogger (logStdoutDev)
@@ -78,6 +79,11 @@ app' Config{..} conn = do
   {- Serves a file/files for :subdomain -}
   S.post "/serve/:subdomain" $ auth conn $ \user ->
     serveView user conn
+
+  {- Route for the receiver, using /s/:subdomain/ instead -}
+  S.matchAny subdomainInPathPattern $
+    storeDataView conn
+
 
 requestProperty :: (Request -> a) -> S.ActionM a
 requestProperty prop = prop <$> S.request
@@ -200,7 +206,12 @@ subdomainRoutePattern' domainPattern req = do
   hostHeader <- requestHeaderHost req
   let domain = domainFromHost (toString hostHeader)
   matched <- subdomainMatch domainPattern domain
-  pure $ [("subdomain", fromString matched)]
+  pure [("subdomain", fromString matched)]
+
+subdomainInPathPattern :: S.RoutePattern
+subdomainInPathPattern = S.function $ \req -> do
+  ("s":subdomain:_) <- pure $ pathInfo req
+  pure [("subdomain", convert subdomain)]
 
 subdomainMatch :: String -> String -> Maybe String
 subdomainMatch domainPattern host =
@@ -234,7 +245,5 @@ app config conn = S.scottyApp $ app' config conn
 
 runApp :: Config -> Connection -> IO ()
 runApp config@Config{..} conn = S.scotty configPort $ do
-  if configDebug
-    then S.middleware $ logStdoutDev
-    else pure ()
+  when configDebug (S.middleware logStdoutDev)
   app' config conn

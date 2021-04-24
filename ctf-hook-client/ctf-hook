@@ -268,6 +268,7 @@ def main(args, domain, url, user, password):
 
     logger.info(f"Using domain {client.key}.{client.domain}")
     logger.info(f"   Try a query: curl {client.key}.{client.domain}/flag-xxyy")
+    logger.info(f"            or: curl {client.domain}/s/{client.key}/flag-xxyy")
     append_domain_history(client.key)
 
     if args.serve:

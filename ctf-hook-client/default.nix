@@ -2,7 +2,7 @@
 let pythonPackages = nixpkgs.python3Packages;
 in pythonPackages.buildPythonApplication rec {
   pname = "ctf-hook-client";
-  version = "0.2.0";
+  version = "0.2.1";
 
   src = builtins.filterSource (path: type:
     let f = builtins.baseNameOf path;
