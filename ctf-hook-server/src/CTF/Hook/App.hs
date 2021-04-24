@@ -100,7 +100,8 @@ storeDataView r = do
       S.setHeader "Content-Type" (convert $ srContentType response')
       S.raw (convert $ srContent response')
     Right Nothing -> do
-      S.text $ fromString $ "data stored for subdomain " ++ show subdomain ++ "!"
+      let sd = convert (unSubdomain subdomain)
+      S.text $ fromString $ "data stored for subdomain " ++ sd ++ "!"
     Left _ -> do
       S.status status500
       S.json (str $ "other redis error")
