@@ -9,7 +9,10 @@ import           Control.Monad.IO.Class               (MonadIO (liftIO))
 import           Control.Monad.Trans.Except           (runExceptT)
 import           Control.Monad.Trans.Maybe            (MaybeT (MaybeT, runMaybeT))
 import           Crypto.BCrypt                        (validatePassword)
-import           Data.Aeson                           (Value (..), encode)
+import           Data.Aeson                           ((.=),
+                                                       Value (..),
+                                                       object,
+                                                       encode)
 import qualified Data.ByteString                      as B
 import qualified Data.ByteString.Lazy                 as LB
 import           Data.Char                            (isDigit)
@@ -32,6 +35,7 @@ import           CTF.Hook.Convert                     (convert, toString)
 import           CTF.Hook.DB
 import           CTF.Hook.Request                     (parseRequest)
 import           CTF.Hook.Types                       (SessionToken (..),
+                                                       Subdomain (..),
                                                        User (User))
 import           CTF.Hook.Utils                       (eitherToMaybe,
                                                        magicContentType)
@@ -68,12 +72,12 @@ app' Config{..} conn = do
     loginView configUsers conn
 
   {- Fetches data for :subdomain -}
-  S.get "/fetch/:subdomain" $ auth conn $ \_ ->
-    fetchView conn
+  S.get "/fetch/:subdomain" $ auth conn $ \user ->
+    fetchView user conn
 
   {- Serves a file/files for :subdomain -}
-  S.post "/serve/:subdomain" $ auth conn $ \_ ->
-    serveView conn
+  S.post "/serve/:subdomain" $ auth conn $ \user ->
+    serveView user conn
 
 requestProperty :: (Request -> a) -> S.ActionM a
 requestProperty prop = prop <$> S.request
@@ -83,12 +87,12 @@ redis conn = runExceptT . runRedis conn
 
 storeDataView :: Connection -> S.ActionM ()
 storeDataView r = do
-  subdomain <- S.param "subdomain"
+  subdomain <- subdomainParam
   storableReq <- encode <$> parseRequest
   path <- requestProperty rawPathInfo
   response <- redis r $ do
-    pushData (fromString subdomain) (LB.toStrict storableReq)
-    fetchServedResponse (fromString subdomain) path
+    pushData subdomain (LB.toStrict storableReq)
+    fetchServedResponse subdomain path
 
   liftIO $ print $ response
   case response of
@@ -96,7 +100,7 @@ storeDataView r = do
       S.setHeader "Content-Type" (convert $ srContentType response')
       S.raw (convert $ srContent response')
     Right Nothing -> do
-      S.text $ fromString $ "data stored for subdomain " ++ subdomain ++ "!"
+      S.text $ fromString $ "data stored for subdomain " ++ show subdomain ++ "!"
     Left _ -> do
       S.status status500
       S.json (str $ "other redis error")
@@ -104,10 +108,10 @@ storeDataView r = do
 indexView :: S.ActionM ()
 indexView = S.text "hello world!"
 
-fetchView :: Connection -> S.ActionM ()
-fetchView r = do
-  subdomain <- S.param "subdomain"
-  response <- redis r $ readData subdomain
+fetchView :: User -> Connection -> S.ActionM ()
+fetchView user r = do
+  subdomain <- subdomainParam
+  response <- redis r $ readData user subdomain
   case response of
     Right (Just d) -> do
       S.setHeader "Content-Type" "application/json; charset=utf-8"
@@ -120,14 +124,15 @@ fetchView r = do
       S.status status500
       S.json (str $ "other redis error")
 
-serveView :: Connection -> S.ActionM ()
-serveView r = do
-    subdomain <- S.param "subdomain"
+serveView :: User -> Connection -> S.ActionM ()
+serveView user r = do
+    subdomain <- subdomainParam
     path      <- appendSlash <$> S.param "path"
     (_, f):_ <- S.files
     let content = convert (fileContent f)
     contentType <- getFileContentType content
-    redis r $ storeServedResponse subdomain
+    redis r $ storeServedResponse user
+                                  subdomain
                                   path
                                   ServableResponse { srContentType = contentType
                                                    , srContent = content }
@@ -156,14 +161,26 @@ auth r cont = do
       $ sessionUser token
   maybe failure cont user
 
+subdomainParam :: S.ActionM Subdomain
+subdomainParam = Subdomain <$> S.param "subdomain"
+
 loginView :: Foldable t => t ConfigUser -> Connection -> S.ActionM ()
 loginView users r = do
   user <- S.param "user"
   pass <- S.param "password"
+  requestedSubdomain <- (Just <$> subdomainParam) `S.rescue` (\_ -> pure Nothing)
   if verifyCredentials users user pass
-    then do
-      Right (SessionToken token) <- redis r $ newSession $ User (convert user)
-      S.json (str $ convert token)
+    then
+    redis r (newSession (User (convert user)) requestedSubdomain) >>= \case
+      Right (Just (SessionToken token, Subdomain subdomain)) ->
+        S.json (object [ "token" .= str (convert token)
+                       , "subdomain" .= str (convert subdomain) ])
+      Right Nothing -> do
+        S.status status403
+        S.json (str $ "Not allowed to access subdomain")
+      _ -> do
+        S.status status500
+        S.json (str $ "error")
     else do
       S.status status403
       S.json (str $ "Invalid username or password")

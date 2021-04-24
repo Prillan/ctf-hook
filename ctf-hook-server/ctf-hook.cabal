@@ -1,5 +1,5 @@
 name:                ctf-hook
-version:             0.1.0.0
+version:             0.2.0.0
 -- synopsis:
 -- description:
 homepage:            https://github.com/Prillan/ctf-hook
@@ -15,7 +15,7 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  ghc-options:         -Wall -Wno-unused-do-bind
+  ghc-options:         -Wall -Wno-unused-do-bind -Werror=incomplete-patterns -O2
   exposed-modules:     CTF.Hook.App
                        CTF.Hook.DB
                        CTF.Hook.Config
@@ -33,7 +33,7 @@ library
                      , http-types
                      , magic
                      , network
-                     , random
+                     , MonadRandom
                      , scotty
                      , text
                      , transformers
@@ -44,7 +44,7 @@ library
 executable ctf-hook-server
   hs-source-dirs:      app
   main-is:             Main.hs
-  ghc-options:         -Wall -Wno-unused-do-bind -threaded -O2 -rtsopts -with-rtsopts=-N
+  ghc-options:         -Wall -Wno-unused-do-bind -Werror=incomplete-patterns -threaded -O2 -rtsopts -with-rtsopts=-N
   build-depends:       base
                      , ctf-hook
                      , bytestring
@@ -64,7 +64,7 @@ test-suite ctf-hook-test
                      , hspec-wai
                      , hspec-wai-json
                      , http-types
-  ghc-options:         -Wall -Wno-unused-do-bind -threaded -O2 -rtsopts -with-rtsopts=-N
+  ghc-options:         -Wall -Wno-unused-do-bind  -Werror=incomplete-patterns -threaded -O2 -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 
 source-repository head

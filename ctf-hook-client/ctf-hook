@@ -109,7 +109,7 @@ class Client():
         self.url = url
         self.user = user
         self.password = password
-        self.key = subdomain or gen_key()
+        self.key = subdomain
         self.token = None
         self.session = requests.Session()
         self._serving = {}
@@ -117,14 +117,19 @@ class Client():
         self._watch_thread = None
 
     def login(self):
+        params = {'user': self.user, 'password': self.password}
+        if self.key:
+            params['subdomain'] = self.key
         r = self.session.post(
             f'{self.url}/login',
-            data={'user': self.user, 'password': self.password}
+            data=params
         )
 
         if r.status_code == 200:
-            self.token = r.json()
-            logger.debug(f"Logged in, token is: {self.token}")
+            data = r.json()
+            self.token = data['token']
+            self.key = data['subdomain']
+            logger.debug(f"Logged in, token is: {self.token}, subdomain is: {self.key}")
             self.session.headers['Authorization'] = 'Bearer ' + self.token
         elif r.status_code == 403:
             raise Exception("Login failed: " + r.json()) from None
