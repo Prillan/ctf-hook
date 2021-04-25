@@ -13,7 +13,7 @@ eitherToMaybe (Right x) = Just x
 eitherToMaybe _         = Nothing
 
 magicContentType :: MonadIO m => B.ByteString -> m String
-magicContentType content = liftIO $ do
+magicContentType content = liftIO do
   magic <- magicOpen [MagicMimeType]
   magicLoadDefault magic
   B.useAsCStringLen content (magicCString magic)

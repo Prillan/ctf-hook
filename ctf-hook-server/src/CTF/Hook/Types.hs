@@ -1,4 +1,3 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module CTF.Hook.Types ( User(..)
                       , SessionToken(..)
                       , Subdomain(..) ) where

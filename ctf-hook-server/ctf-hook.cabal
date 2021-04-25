@@ -1,5 +1,5 @@
 name:                ctf-hook
-version:             0.2.2.0
+version:             0.2.2.1
 -- synopsis:
 -- description:
 homepage:            https://github.com/Prillan/ctf-hook
@@ -24,6 +24,7 @@ library
                        CTF.Hook.Types
                        CTF.Hook.Utils
   build-depends:       base >= 4.7 && < 5
+                     , MonadRandom
                      , aeson
                      , base64-bytestring
                      , bcrypt
@@ -32,14 +33,26 @@ library
                      , hedis
                      , http-types
                      , magic
+                     , mtl
                      , network
-                     , MonadRandom
                      , scotty
                      , text
                      , transformers
                      , wai
                      , wai-extra
   default-language:    Haskell2010
+  default-extensions:  BlockArguments
+                       DeriveDataTypeable
+                       DeriveGeneric
+                       FlexibleContexts
+                       FlexibleInstances
+                       GADTs
+                       GeneralizedNewtypeDeriving
+                       LambdaCase
+                       MultiParamTypeClasses
+                       OverloadedStrings
+                       RecordWildCards
+                       UndecidableInstances
 
 executable ctf-hook-server
   hs-source-dirs:      app

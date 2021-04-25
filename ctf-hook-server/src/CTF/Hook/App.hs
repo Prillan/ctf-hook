@@ -1,11 +1,6 @@
-{-# LANGUAGE GADTs             #-}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
-module CTF.Hook.App where -- (runApp, app) where
+module CTF.Hook.App where
 
-import           Control.Monad                        (join, when)
-import           Control.Monad.IO.Class               (MonadIO)
+import           Control.Monad                        (unless, when)
 import           Control.Monad.Trans.Except           (runExceptT)
 import           Control.Monad.Trans.Maybe            (MaybeT (MaybeT, runMaybeT))
 import           Control.Monad.Trans.Random           (evalRandTIO)
@@ -18,8 +13,7 @@ import           Data.Char                            (isDigit)
 import           Data.String                          (fromString)
 import qualified Data.Text
 import           Database.Redis                       (Connection)
-import           Network.HTTP.Types.Status            (Status, status403,
-                                                       status500)
+import           Network.HTTP.Types.Status            (status403, status500)
 import           Network.Wai                          (Application, Request,
                                                        pathInfo, rawPathInfo,
                                                        requestHeaderHost)
@@ -35,8 +29,7 @@ import           CTF.Hook.Request                     (parseRequest)
 import           CTF.Hook.Types                       (SessionToken (..),
                                                        Subdomain (..),
                                                        User (User))
-import           CTF.Hook.Utils                       (eitherToMaybe,
-                                                       magicContentType)
+import           CTF.Hook.Utils                       (magicContentType)
 {-|
 Two parts:
 
@@ -70,11 +63,11 @@ app' Config{..} conn = do
     loginView configUsers conn
 
   {- Fetches data for :subdomain -}
-  S.get "/fetch/:subdomain" $ auth conn $ \user ->
+  S.get "/fetch/:subdomain" $ auth conn \user ->
     fetchView user conn
 
   {- Serves a file/files for :subdomain -}
-  S.post "/serve/:subdomain" $ auth conn $ \user ->
+  S.post "/serve/:subdomain" $ auth conn \user ->
     serveView user conn
 
   {- Route for the receiver, using /s/:subdomain/ instead -}
@@ -85,29 +78,36 @@ app' Config{..} conn = do
 requestProperty :: (Request -> a) -> S.ActionM a
 requestProperty prop = prop <$> S.request
 
-redis :: MonadIO m => Connection -> Redis a -> m (Either [Error] a)
-redis conn = runExceptT . runRedis conn
+redis :: Connection -> Redis a -> S.ActionM a
+redis conn a = runExceptT (runRedis conn a)  >>= \case
+  Right v -> pure v
+  Left e -> handleError e
 
-
-returnErrors :: Show a => Status -> [a] -> S.ActionM ()
-returnErrors s es = S.status s *> S.json (object [ "errors" .= toJSON (map show es) ])
+handleError :: Error -> S.ActionM a
+handleError e =
+  let (s, msg) = case e of
+        RedisError _   -> (status500, "redis error")
+        GeneralError m -> (status500, "unknown error: " <> m)
+        Unauthorized m -> (status403, "unauthorized: " <> m)
+  in S.status s
+     *> S.json (object [ "errors" .= toJSON [msg] ])
+     *> S.finish
 
 storeDataView :: Connection -> S.ActionM ()
 storeDataView r = do
   subdomain <- subdomainParam
   storableReq <- encode <$> parseRequest
   path <- requestProperty rawPathInfo
-  response <- redis r $ do
+  response <- redis r do
     pushData subdomain (LB.toStrict storableReq)
     fetchServedResponse subdomain path
   case response of
-    Right (Just response') -> do
+    Just response' -> do
       S.setHeader "Content-Type" (convert $ srContentType response')
       S.raw (convert $ srContent response')
-    Right Nothing -> do
+    Nothing -> do
       let sd = convert (unSubdomain subdomain)
       S.text $ fromString $ "data stored for subdomain " ++ sd ++ "!"
-    Left es -> returnErrors status500 es
 
 indexView :: S.ActionM ()
 indexView = S.text "hello world!"
@@ -117,25 +117,24 @@ fetchView user r = do
   subdomain <- subdomainParam
   response <- redis r $ readData user subdomain
   case response of
-    Right (Just d) -> do
+    Just d -> do
       S.setHeader "Content-Type" "application/json; charset=utf-8"
       S.raw (LB.fromStrict d)
-    Right Nothing  -> S.json Null
-    Left es -> returnErrors status500 es
+    Nothing -> S.json Null
 
 serveView :: User -> Connection -> S.ActionM ()
 serveView user r = do
-    subdomain <- subdomainParam
-    path      <- appendSlash <$> S.param "path"
-    (_, f):_ <- S.files
-    let content = convert (fileContent f)
-    contentType <- getFileContentType content
-    redis r $ storeServedResponse user
-                                  subdomain
-                                  path
-                                  ServableResponse { srContentType = contentType
-                                                   , srContent = content }
-    S.json (str $ "Files stored")
+  subdomain <- subdomainParam
+  path      <- appendSlash <$> S.param "path"
+  (_, f):_  <- S.files
+  let content = convert (fileContent f)
+  contentType <- getFileContentType content
+  redis r $ storeServedResponse user
+                                subdomain
+                                path
+                                ServableResponse { srContentType = contentType
+                                                 , srContent = content }
+  S.json (str $ "Files stored")
 
 appendSlash :: B.ByteString -> B.ByteString
 appendSlash x =
@@ -152,12 +151,9 @@ getFileContentType content =
 auth :: Connection -> (User -> S.ActionM ()) -> S.ActionM ()
 auth r cont = do
   let failure = S.status status403 *> S.json (str "Failed to validate session token")
-  user <- runMaybeT $ do
+  user <- runMaybeT do
     token <- getRequestToken
-    MaybeT
-      . fmap (join . eitherToMaybe)
-      . redis r
-      $ sessionUser token
+    MaybeT . redis r $ sessionUser token
   maybe failure cont user
 
 subdomainParam :: S.ActionM Subdomain
@@ -167,22 +163,20 @@ loginView :: Foldable t => t ConfigUser -> Connection -> S.ActionM ()
 loginView users r = do
   user <- S.param "user"
   pass <- S.param "password"
-  requestedSubdomain <- (Just <$> subdomainParam) `S.rescue` (\_ -> pure Nothing)
-  if verifyCredentials users user pass
-    then login r (User (convert user)) requestedSubdomain >>= \case
-      Right (SessionToken token , Subdomain subdomain) ->
-        S.json (object [ "token" .= str (convert token)
-                       , "subdomain" .= str (convert subdomain) ])
-      Left es -> returnErrors status403 es
-    else do
-      S.status status403
-      S.json (str $ "Invalid username or password")
+  requestedSubdomain <- (Just <$> subdomainParam) `S.rescue` \_ -> pure Nothing
+  unless (verifyCredentials users user pass) do
+    S.status status403
+    S.json (str $ "Invalid username or password")
+    S.finish
 
-login :: MonadIO m
-  => Connection
+  (SessionToken token , Subdomain subdomain) <- login r (User (convert user)) requestedSubdomain
+  S.json (object [ "token" .= str (convert token)
+                 , "subdomain" .= str (convert subdomain) ])
+
+login :: Connection
   -> User
   -> Maybe Subdomain
-  -> m (Either [Error] (SessionToken, Subdomain))
+  -> S.ActionM (SessionToken, Subdomain)
 login conn user subdomain =
   redis conn
   . evalRandTIO
@@ -205,7 +199,7 @@ subdomainRoutePattern' domainPattern req = do
   pure [("subdomain", fromString matched)]
 
 subdomainInPathPattern :: S.RoutePattern
-subdomainInPathPattern = S.function $ \req -> do
+subdomainInPathPattern = S.function \req -> do
   ("s":subdomain:_) <- pure $ pathInfo req
   pure [("subdomain", convert subdomain)]
 
@@ -240,6 +234,6 @@ app :: Config -> Connection -> IO Application
 app config conn = S.scottyApp $ app' config conn
 
 runApp :: Config -> Connection -> IO ()
-runApp config@Config{..} conn = S.scotty configPort $ do
+runApp config@Config{..} conn = S.scotty configPort do
   when configDebug (S.middleware logStdoutDev)
   app' config conn

@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
 module CTF.Hook.Config ( Config(..)
                        , ConfigUser(..)
                        , decodeConfig ) where

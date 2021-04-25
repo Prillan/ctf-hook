@@ -12,10 +12,10 @@ import           Test.Hspec
 import           Test.Hspec.Wai
 import           Test.Hspec.Wai.JSON
 
-import           CTF.Hook.App            (stripPort, subdomainMatch)
-import           CTF.Hook.Config         (Config (..), ConfigUser (..),
-                                          decodeConfig)
-import           CTF.Hook.Utils          (magicContentType)
+import           CTF.Hook.App              (stripPort, subdomainMatch)
+import           CTF.Hook.Config           (Config (..), ConfigUser (..),
+                                            decodeConfig)
+import           CTF.Hook.Utils            (magicContentType)
 
 main :: IO ()
 main = hspec spec

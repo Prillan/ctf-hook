@@ -9,11 +9,7 @@ let
 
   myHaskellPackages = haskellPackages.override {
     overrides = hself: hsuper: {
-      "ctf-hook-server" =
-        hself.callCabal2nix
-          "ctf-hook"
-          ./.
-          {};
+      "ctf-hook-server" = hself.callCabal2nix "ctf-hook" ./. { };
     };
   };
 in myHaskellPackages.ctf-hook-server

@@ -1,6 +1,3 @@
-{-# LANGUAGE FlexibleInstances     #-}
-{-# LANGUAGE GADTs                 #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
 module CTF.Hook.Convert ( ToString
                         , convert
                         , toString) where
