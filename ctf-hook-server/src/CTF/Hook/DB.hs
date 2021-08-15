@@ -17,16 +17,17 @@ import           Control.Monad.Trans.Class  (MonadTrans, lift)
 import           Control.Monad.Trans.Except (ExceptT (..), mapExceptT)
 import           Data.ByteString            (ByteString)
 import           Data.Data                  (Data, Typeable)
-import           Data.Foldable              (asum)
+import           Data.Foldable              (asum, fold)
 import           Data.Serialize             (Serialize, decode, encode)
 import           Data.String                (fromString)
+import           Data.Text                  (Text)
 import           Database.Redis             (Connection, RedisCtx, Reply, blpop,
                                              expire, get, hget, hset, rpush,
                                              set)
 import qualified Database.Redis             as R
 import           GHC.Generics               (Generic)
+import           Witch                      (into, tryInto)
 
-import           CTF.Hook.Convert           (convert)
 import           CTF.Hook.Types             (SessionToken (..), Subdomain (..),
                                              User (..))
 
@@ -38,7 +39,7 @@ data Error = RedisError ByteString
 
 instance Show Error where
   show = \case
-    RedisError e -> "redis error: " <> convert e
+    RedisError e -> "redis error: " <> (into @String . fold . tryInto @Text $ e)
     Unauthorized e -> "unauthorized: " <> e
     GeneralError e -> e
 
@@ -172,7 +173,7 @@ sessionUser token =
   let key = sessionKey token
   in liftRedis (get key) >>= \case
     Just v -> liftRedis (expire key sessionTimeout) >> pure (Just (User v))
-    _ -> pure Nothing
+    _      -> pure Nothing
 
 pushData :: Subdomain -> ByteString -> Redis ()
 pushData subdomain d = liftRedis $ rpush key [d] *> touchKey key

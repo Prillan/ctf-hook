@@ -1,5 +1,5 @@
 name:                ctf-hook
-version:             0.2.2.1
+version:             0.2.3.0
 -- synopsis:
 -- description:
 homepage:            https://github.com/Prillan/ctf-hook
@@ -19,7 +19,6 @@ library
   exposed-modules:     CTF.Hook.App
                        CTF.Hook.DB
                        CTF.Hook.Config
-                       CTF.Hook.Convert
                        CTF.Hook.Request
                        CTF.Hook.Types
                        CTF.Hook.Utils
@@ -40,6 +39,7 @@ library
                      , transformers
                      , wai
                      , wai-extra
+                     , witch
   default-language:    Haskell2010
   default-extensions:  BlockArguments
                        DeriveDataTypeable
@@ -52,6 +52,7 @@ library
                        MultiParamTypeClasses
                        OverloadedStrings
                        RecordWildCards
+                       TypeApplications
                        UndecidableInstances
 
 executable ctf-hook-server

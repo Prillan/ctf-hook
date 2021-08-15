@@ -1,10 +1,12 @@
 module CTF.Hook.Request ( StorableRequest(..)
                         , parseRequest ) where
 
-import           CTF.Hook.Convert            (convert)
 import           Data.Aeson                  (FromJSON, ToJSON, Value)
+import           Data.Bifunctor              (bimap)
+import           Data.ByteString             (ByteString)
 import qualified Data.ByteString.Base64.Lazy as B64
 import           Data.Data                   (Data, Typeable)
+import           Data.Foldable               (fold)
 import           Data.Text                   (Text)
 import           GHC.Generics                (Generic)
 import           Network.Wai                 (pathInfo, rawPathInfo,
@@ -12,6 +14,7 @@ import           Network.Wai                 (pathInfo, rawPathInfo,
                                               requestMethod)
 import           Web.Scotty                  (ActionM, Param, rescue)
 import qualified Web.Scotty                  as Scotty
+import           Witch                       (into, tryInto)
 
 data StorableRequest =
   StorableRequest { method           :: Text
@@ -33,12 +36,12 @@ parseRequest :: ActionM StorableRequest
 parseRequest = do
   req <- Scotty.request
   StorableRequest
-    <$> pure (convert (requestMethod req))
-    <*> pure (pathInfo req)
+    <$> (pure . fold . tryInto @Text . requestMethod $ req)
+    <*> (pure . pathInfo $ req)
     <*> (drop 1 <$> Scotty.params) -- we drop the "subdomain" one
-    <*> pure (convert (show (remoteHost req)))
+    <*> (pure . into @Text . show . remoteHost $ req)
     <*> Scotty.jsonData `rescue` (const (pure Nothing))
-    <*> (map (\(k, v) -> (convert k, convert v)) <$> Scotty.headers)
-    <*> pure (convert (rawPathInfo req))
-    <*> pure (convert (rawQueryString req))
-    <*> (convert . B64.encode <$> Scotty.body)
+    <*> (map (bimap (into @Text) (into @Text)) <$> Scotty.headers)
+    <*> (pure . fold . tryInto @Text . rawPathInfo $ req)
+    <*> (pure . fold . tryInto @Text . rawQueryString $ req)
+    <*> (fold . tryInto @Text . into @ByteString . B64.encode <$> Scotty.body)

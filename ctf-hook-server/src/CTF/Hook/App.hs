@@ -10,8 +10,9 @@ import           Data.Aeson                           (Value (..), encode,
 import qualified Data.ByteString                      as B
 import qualified Data.ByteString.Lazy                 as LB
 import           Data.Char                            (isDigit)
+import           Data.Foldable                        (asum, fold)
 import           Data.String                          (fromString)
-import qualified Data.Text
+import           Data.Text                            (Text)
 import           Database.Redis                       (Connection)
 import           Network.HTTP.Types.Status            (status403, status500)
 import           Network.Wai                          (Application, Request,
@@ -20,10 +21,10 @@ import           Network.Wai                          (Application, Request,
 import           Network.Wai.Middleware.RequestLogger (logStdoutDev)
 import           Network.Wai.Parse                    (FileInfo (..))
 import qualified Web.Scotty                           as S
+import           Witch                                (cast, into, tryInto, via)
 
 import           CTF.Hook.Config                      (Config (..),
                                                        ConfigUser (..))
-import           CTF.Hook.Convert                     (convert, toString)
 import           CTF.Hook.DB
 import           CTF.Hook.Request                     (parseRequest)
 import           CTF.Hook.Types                       (SessionToken (..),
@@ -81,7 +82,7 @@ requestProperty prop = prop <$> S.request
 redis :: Connection -> Redis a -> S.ActionM a
 redis conn a = runExceptT (runRedis conn a)  >>= \case
   Right v -> pure v
-  Left e -> handleError e
+  Left e  -> handleError e
 
 handleError :: Error -> S.ActionM a
 handleError e =
@@ -96,18 +97,18 @@ handleError e =
 storeDataView :: Connection -> S.ActionM ()
 storeDataView r = do
   subdomain <- subdomainParam
-  storableReq <- encode <$> parseRequest
+  storableReq <- cast . encode <$> parseRequest
   path <- requestProperty rawPathInfo
   response <- redis r do
-    pushData subdomain (LB.toStrict storableReq)
+    pushData subdomain storableReq
     fetchServedResponse subdomain path
   case response of
     Just response' -> do
-      S.setHeader "Content-Type" (convert $ srContentType response')
-      S.raw (convert $ srContent response')
+      S.setHeader "Content-Type" (cast $ srContentType response')
+      S.raw (cast $ srContent response')
     Nothing -> do
-      let sd = convert (unSubdomain subdomain)
-      S.text $ fromString $ "data stored for subdomain " ++ sd ++ "!"
+      let sd = fold . tryInto @Text . unSubdomain $ subdomain
+      S.text $ fromString $ "data stored for subdomain " ++ into @String sd ++ "!"
 
 indexView :: S.ActionM ()
 indexView = S.text "hello world!"
@@ -127,7 +128,7 @@ serveView user r = do
   subdomain <- subdomainParam
   path      <- appendSlash <$> S.param "path"
   (_, f):_  <- S.files
-  let content = convert (fileContent f)
+  let content = cast (fileContent f)
   contentType <- getFileContentType content
   redis r $ storeServedResponse user
                                 subdomain
@@ -161,7 +162,7 @@ subdomainParam = Subdomain <$> S.param "subdomain"
 
 loginView :: Foldable t => t ConfigUser -> Connection -> S.ActionM ()
 loginView users r = do
-  user <- S.param "user"
+  user <- User <$> S.param "user"
   pass <- S.param "password"
   requestedSubdomain <- (Just <$> subdomainParam) `S.rescue` \_ -> pure Nothing
   unless (verifyCredentials users user pass) do
@@ -169,9 +170,9 @@ loginView users r = do
     S.json (str $ "Invalid username or password")
     S.finish
 
-  (SessionToken token , Subdomain subdomain) <- login r (User (convert user)) requestedSubdomain
-  S.json (object [ "token" .= str (convert token)
-                 , "subdomain" .= str (convert subdomain) ])
+  (SessionToken token , Subdomain subdomain) <- login r user requestedSubdomain
+  S.json (object [ "token" .= str (fold (tryInto @Text token))
+                 , "subdomain" .= str (fold (tryInto @Text subdomain)) ])
 
 login :: Connection
   -> User
@@ -184,7 +185,7 @@ login conn user subdomain =
 
 getRequestToken :: MaybeT S.ActionM SessionToken
 getRequestToken = do
-  ["Bearer", token] <- words . convert <$> MaybeT (S.header "Authorization")
+  ["Bearer", token] <- words . cast <$> MaybeT (S.header "Authorization")
   pure (fromString token)
 
 subdomainRoutePattern :: String -> S.RoutePattern
@@ -193,15 +194,15 @@ subdomainRoutePattern domainPattern =
 
 subdomainRoutePattern' :: String -> Request -> Maybe [S.Param]
 subdomainRoutePattern' domainPattern req = do
-  hostHeader <- requestHeaderHost req
-  let domain = domainFromHost (toString hostHeader)
+  hostHeader <- asum . traverse (tryInto @Text) . requestHeaderHost $ req
+  let domain = domainFromHost (into @String hostHeader)
   matched <- subdomainMatch domainPattern domain
   pure [("subdomain", fromString matched)]
 
 subdomainInPathPattern :: S.RoutePattern
 subdomainInPathPattern = S.function \req -> do
   ("s":subdomain:_) <- pure $ pathInfo req
-  pure [("subdomain", convert subdomain)]
+  pure [("subdomain", cast subdomain)]
 
 subdomainMatch :: String -> String -> Maybe String
 subdomainMatch domainPattern host =
@@ -223,12 +224,12 @@ stripPort host =
 
 verifyCredentials :: Foldable t
                   => t ConfigUser
-                  -> String
+                  -> User
                   -> String
                   -> Bool
-verifyCredentials users u p = any check users
+verifyCredentials users (User u) p = any check users
   where check (ConfigUser u' h) =
-          u == u' && validatePassword (fromString h) (fromString p)
+          u == via @Text u' && validatePassword (via @Text h) (via @Text p)
 
 app :: Config -> Connection -> IO Application
 app config conn = S.scottyApp $ app' config conn
