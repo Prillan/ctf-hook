@@ -20,13 +20,13 @@ import           Data.Data                  (Data, Typeable)
 import           Data.Foldable              (asum, fold)
 import           Data.Serialize             (Serialize, decode, encode)
 import           Data.String                (fromString)
-import           Data.Text                  (Text)
+import           Data.Text.Encoding         (decodeUtf8')
 import           Database.Redis             (Connection, RedisCtx, Reply, blpop,
                                              expire, get, hget, hset, rpush,
                                              set)
 import qualified Database.Redis             as R
 import           GHC.Generics               (Generic)
-import           Witch                      (into, tryInto)
+import           Witch                      (into)
 
 import           CTF.Hook.Types             (SessionToken (..), Subdomain (..),
                                              User (..))
@@ -39,7 +39,7 @@ data Error = RedisError ByteString
 
 instance Show Error where
   show = \case
-    RedisError e -> "redis error: " <> (into @String . fold . tryInto @Text $ e)
+    RedisError e -> "redis error: " <> (into @String . fold . decodeUtf8' $ e)
     Unauthorized e -> "unauthorized: " <> e
     GeneralError e -> e
 

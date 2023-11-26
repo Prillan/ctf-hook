@@ -6,14 +6,15 @@ import           Data.Aeson           (FromJSON (parseJSON), Options, camelTo2,
                                        defaultOptions, eitherDecode,
                                        fieldLabelModifier, genericParseJSON)
 import           Data.ByteString.Lazy (ByteString)
+import           Data.Text            (Text)
 import           GHC.Generics         (Generic)
 
-data ConfigUser = ConfigUser { userName :: String
-                             , userHash :: String }
+data ConfigUser = ConfigUser { userName :: Text
+                             , userHash :: Text }
   deriving (Show, Read, Eq, Generic)
 
 data Config = Config { configUsers         :: [ConfigUser]
-                     , configDomainPattern :: String
+                     , configDomainPattern :: Text
                      , configPort          :: Int
                      , configDebug         :: Bool }
   deriving (Show, Read, Eq, Generic)

@@ -13,6 +13,7 @@ import           Data.Char                            (isDigit)
 import           Data.Foldable                        (asum, fold)
 import           Data.String                          (fromString)
 import           Data.Text                            (Text)
+import           Data.Text.Encoding                   (encodeUtf8, decodeUtf8')
 import           Database.Redis                       (Connection)
 import           Network.HTTP.Types.Status            (status403, status500)
 import           Network.Wai                          (Application, Request,
@@ -21,7 +22,7 @@ import           Network.Wai                          (Application, Request,
 import           Network.Wai.Middleware.RequestLogger (logStdoutDev)
 import           Network.Wai.Parse                    (FileInfo (..))
 import qualified Web.Scotty                           as S
-import           Witch                                (cast, into, tryInto, via)
+import           Witch                                (into)
 
 import           CTF.Hook.Config                      (Config (..),
                                                        ConfigUser (..))
@@ -52,7 +53,7 @@ str = Data.Aeson.String
 app' :: Config -> Connection -> S.ScottyM ()
 app' Config{..} conn = do
   {- Route for the receiver, any data posted is stored here -}
-  S.matchAny (subdomainRoutePattern configDomainPattern) $
+  S.matchAny (subdomainRoutePattern (into @String configDomainPattern)) $
     storeDataView conn
 
   {- Hello world -}
@@ -97,17 +98,17 @@ handleError e =
 storeDataView :: Connection -> S.ActionM ()
 storeDataView r = do
   subdomain <- subdomainParam
-  storableReq <- cast . encode <$> parseRequest
+  storableReq <- into . encode <$> parseRequest
   path <- requestProperty rawPathInfo
   response <- redis r do
     pushData subdomain storableReq
     fetchServedResponse subdomain path
   case response of
     Just response' -> do
-      S.setHeader "Content-Type" (cast $ srContentType response')
-      S.raw (cast $ srContent response')
+      S.setHeader "Content-Type" (into $ srContentType response')
+      S.raw (into $ srContent response')
     Nothing -> do
-      let sd = fold . tryInto @Text . unSubdomain $ subdomain
+      let sd = fold . decodeUtf8' . unSubdomain $ subdomain
       S.text $ fromString $ "data stored for subdomain " ++ into @String sd ++ "!"
 
 indexView :: S.ActionM ()
@@ -128,7 +129,7 @@ serveView user r = do
   subdomain <- subdomainParam
   path      <- appendSlash <$> S.param "path"
   (_, f):_  <- S.files
-  let content = cast (fileContent f)
+  let content = into (fileContent f)
   contentType <- getFileContentType content
   redis r $ storeServedResponse user
                                 subdomain
@@ -171,8 +172,8 @@ loginView users r = do
     S.finish
 
   (SessionToken token , Subdomain subdomain) <- login r user requestedSubdomain
-  S.json (object [ "token" .= str (fold (tryInto @Text token))
-                 , "subdomain" .= str (fold (tryInto @Text subdomain)) ])
+  S.json (object [ "token" .= str (fold (decodeUtf8' token))
+                 , "subdomain" .= str (fold (decodeUtf8' subdomain)) ])
 
 login :: Connection
   -> User
@@ -185,7 +186,7 @@ login conn user subdomain =
 
 getRequestToken :: MaybeT S.ActionM SessionToken
 getRequestToken = do
-  ["Bearer", token] <- words . cast <$> MaybeT (S.header "Authorization")
+  ["Bearer", token] <- words . into <$> MaybeT (S.header "Authorization")
   pure (fromString token)
 
 subdomainRoutePattern :: String -> S.RoutePattern
@@ -194,7 +195,7 @@ subdomainRoutePattern domainPattern =
 
 subdomainRoutePattern' :: String -> Request -> Maybe [S.Param]
 subdomainRoutePattern' domainPattern req = do
-  hostHeader <- asum . traverse (tryInto @Text) . requestHeaderHost $ req
+  hostHeader <- asum . traverse decodeUtf8' . requestHeaderHost $ req
   let domain = domainFromHost (into @String hostHeader)
   matched <- subdomainMatch domainPattern domain
   pure [("subdomain", fromString matched)]
@@ -202,7 +203,7 @@ subdomainRoutePattern' domainPattern req = do
 subdomainInPathPattern :: S.RoutePattern
 subdomainInPathPattern = S.function \req -> do
   ("s":subdomain:_) <- pure $ pathInfo req
-  pure [("subdomain", cast subdomain)]
+  pure [("subdomain", into subdomain)]
 
 subdomainMatch :: String -> String -> Maybe String
 subdomainMatch domainPattern host =
@@ -229,7 +230,7 @@ verifyCredentials :: Foldable t
                   -> Bool
 verifyCredentials users (User u) p = any check users
   where check (ConfigUser u' h) =
-          u == via @Text u' && validatePassword (via @Text h) (via @Text p)
+          u == encodeUtf8 u' && validatePassword (encodeUtf8 h) (encodeUtf8 $ into @Text p)
 
 app :: Config -> Connection -> IO Application
 app config conn = S.scottyApp $ app' config conn
